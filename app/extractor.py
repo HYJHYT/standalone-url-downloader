@@ -80,6 +80,8 @@ class MediaExtractor:
             raise ValueError('没有解析到可用的媒体信息。')
 
         collection_type = _detect_collection_type(info)
+        if '/profile/' in normalized_url.lower():
+            collection_type = '用户空间'
         entries = info.get('entries')
         if entries is None:
             items = [_build_item(info, normalized_url)]
@@ -94,3 +96,26 @@ class MediaExtractor:
             uploader=str(info.get('uploader') or info.get('channel') or info.get('playlist_uploader') or ''),
             items=items,
         )
+
+    def enrich_item(self, item: MediaItem) -> MediaItem:
+        """完整解析单个视频并补全标题、作者、日期、时长和封面信息。"""
+        options = {
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        if self._ffmpeg_location:
+            options['ffmpeg_location'] = str(self._ffmpeg_location)
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(item.url, download=False)
+        if not info:
+            raise ValueError('没有获取到视频详情。')
+        enriched_item = _build_item(info, item.url)
+        item.id = enriched_item.id
+        item.title = enriched_item.title
+        item.thumbnail = enriched_item.thumbnail
+        item.uploader = enriched_item.uploader
+        item.upload_date = enriched_item.upload_date
+        item.duration = enriched_item.duration
+        item.detail_status = '已完成'
+        return item

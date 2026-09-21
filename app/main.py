@@ -7,12 +7,18 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from app.config import APP_NAME, resolve_ffmpeg_location, resolve_history_database
+from app.config import (
+    APP_NAME,
+    resolve_ffmpeg_location,
+    resolve_history_database,
+    resolve_thumbnail_cache_dir,
+)
 from app.downloader import DownloadProgress, build_friendly_error
 from app.extractor import MediaExtractor
 from app.history import DownloadHistory
 from app.models import DownloadOptions, DownloadTask, MediaCollection, MediaItem
 from app.task_queue import DownloadQueue
+from app.thumbnail import load_thumbnail_image
 
 
 class MediaHubWindow:
@@ -23,6 +29,11 @@ class MediaHubWindow:
         self.root = root
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.worker_thread: threading.Thread | None = None
+        self.detail_thread: threading.Thread | None = None
+        self.detail_cancel_event = threading.Event()
+        self.thumbnail_thread: threading.Thread | None = None
+        self.thumbnail_photo = None
+        self.selected_item: MediaItem | None = None
         self.collection: MediaCollection | None = None
         self.row_items: dict[str, MediaItem] = {}
         self.download_queue: DownloadQueue | None = None
@@ -100,13 +111,15 @@ class MediaHubWindow:
 
         detail_panel = ttk.LabelFrame(container, text='媒体详情', padding=8)
         detail_panel.grid(row=3, column=0, sticky='ew', pady=(0, 8))
-        detail_panel.columnconfigure(0, weight=1)
+        detail_panel.columnconfigure(1, weight=1)
+        self.thumbnail_preview_label = ttk.Label(detail_panel, text='暂无封面', width=28, anchor='center')
+        self.thumbnail_preview_label.grid(row=0, column=0, rowspan=3, padx=(0, 12), sticky='w')
         ttk.Label(detail_panel, textvariable=self.detail_title_value, font=('Microsoft YaHei UI', 10, 'bold')).grid(
-            row=0, column=0, sticky='w'
+            row=0, column=1, sticky='w'
         )
-        ttk.Label(detail_panel, textvariable=self.detail_info_value).grid(row=1, column=0, sticky='w', pady=(3, 0))
+        ttk.Label(detail_panel, textvariable=self.detail_info_value).grid(row=1, column=1, sticky='w', pady=(3, 0))
         ttk.Label(detail_panel, textvariable=self.thumbnail_value, foreground='#666666').grid(
-            row=2, column=0, sticky='w', pady=(3, 0)
+            row=2, column=1, sticky='w', pady=(3, 0)
         )
 
         selection_row = ttk.Frame(container)
@@ -199,6 +212,7 @@ class MediaHubWindow:
         """校验 URL 并在后台线程中解析媒体集合。"""
         if self.worker_thread and self.worker_thread.is_alive():
             return
+        self.detail_cancel_event.set()
         url = self.url_value.get().strip()
         if not url:
             messagebox.showwarning(APP_NAME, '请输入视频、用户主页、播放列表或搜索结果 URL。')
@@ -221,6 +235,9 @@ class MediaHubWindow:
 
     def _clear_tree(self) -> None:
         """清空媒体列表和对应的项目索引。"""
+        self.selected_item = None
+        self.thumbnail_photo = None
+        self.thumbnail_preview_label.configure(text='暂无封面', image='')
         for row_id in self.media_tree.get_children():
             self.media_tree.delete(row_id)
         self.row_items.clear()
@@ -242,6 +259,77 @@ class MediaHubWindow:
         if collection.items:
             self.media_tree.selection_set('0')
         self.status_value.set('解析完成，请选择需要下载的视频。')
+        self._start_detail_enrichment(collection)
+
+    def _start_detail_enrichment(self, collection: MediaCollection) -> None:
+        """启动后台线程补全集合中每个视频的详细信息。"""
+        self.detail_cancel_event.clear()
+        self.detail_thread = threading.Thread(
+            target=self._run_detail_enrichment,
+            args=(collection,),
+            daemon=True,
+            name='media-detail-worker',
+        )
+        self.detail_thread.start()
+
+    def _run_detail_enrichment(self, collection: MediaCollection) -> None:
+        """后台逐项解析视频详情并向界面发送更新事件。"""
+        extractor = MediaExtractor(resolve_ffmpeg_location())
+        total = len(collection.items)
+        for index, item in enumerate(collection.items, start=1):
+            if self.detail_cancel_event.is_set():
+                break
+            try:
+                item.detail_status = '解析中'
+                extractor.enrich_item(item)
+                self.event_queue.put(('detail_item', (index, total, item, None)))
+            except Exception as exc:
+                item.detail_status = '失败'
+                self.event_queue.put(('detail_item', (index, total, item, build_friendly_error(exc))))
+        self.event_queue.put(('detail_finished', None))
+
+    def _update_detail_item(self, item: MediaItem, error: str | None) -> None:
+        """将一个视频的详情解析结果同步到列表和当前详情面板。"""
+        for row_id, row_item in self.row_items.items():
+            if row_item is item:
+                status = '详情失败' if error else item.status
+                self.media_tree.item(row_id, values=(
+                    item.title, item.uploader or '--', item.duration_text(), item.upload_date, status,
+                ))
+                break
+        if item is self.selected_item:
+            self._show_item_detail(item)
+
+    def _show_item_detail(self, item: MediaItem) -> None:
+        """更新详情面板文本并按需加载当前视频的封面。"""
+        self.detail_title_value.set(item.title)
+        self.detail_info_value.set(
+            f'作者：{item.uploader or "--"}    时长：{item.duration_text()}    发布时间：{item.upload_date}'
+        )
+        self.thumbnail_value.set(f'封面：{item.thumbnail}' if item.thumbnail else '该视频未提供封面地址')
+        self.thumbnail_preview_label.configure(text='封面加载中…', image='')
+        if item.thumbnail:
+            self._start_thumbnail_load(item)
+
+    def _start_thumbnail_load(self, item: MediaItem) -> None:
+        """在后台线程中加载当前视频封面，避免阻塞桌面界面。"""
+        self.thumbnail_thread = threading.Thread(
+            target=self._run_thumbnail_load,
+            args=(item, item.thumbnail),
+            daemon=True,
+            name='thumbnail-worker',
+        )
+        self.thumbnail_thread.start()
+
+    def _run_thumbnail_load(self, item: MediaItem, thumbnail_url: str) -> None:
+        """下载或读取封面缓存并将图片对象发送回界面线程。"""
+        try:
+            image = load_thumbnail_image(
+                thumbnail_url, resolve_thumbnail_cache_dir(), item.id, (240, 135)
+            )
+            self.event_queue.put(('thumbnail_loaded', (item, image, None)))
+        except Exception as exc:
+            self.event_queue.put(('thumbnail_loaded', (item, None, str(exc))))
 
     def _handle_item_selected(self, _event: object) -> None:
         """响应媒体列表选择并显示所选视频的详细信息。"""
@@ -251,11 +339,8 @@ class MediaHubWindow:
         item = self.row_items.get(selected_rows[0])
         if item is None:
             return
-        self.detail_title_value.set(item.title)
-        self.detail_info_value.set(
-            f'作者：{item.uploader or "--"}    时长：{item.duration_text()}    发布时间：{item.upload_date}'
-        )
-        self.thumbnail_value.set(f'封面：{item.thumbnail}' if item.thumbnail else '该视频未提供封面地址')
+        self.selected_item = item
+        self._show_item_detail(item)
 
     def _select_all(self) -> None:
         """选择当前列表中的全部视频。"""
@@ -332,6 +417,34 @@ class MediaHubWindow:
                     self.status_value.set(str(payload))
                     self._set_busy_state(False)
                     messagebox.showerror(APP_NAME, str(payload))
+                elif event_name == 'detail_item' and isinstance(payload, tuple):
+                    index, total, item, error = payload
+                    if isinstance(item, MediaItem):
+                        self._update_detail_item(item, error)
+                        self.collection_value.set(
+                            f'{self.collection.collection_type if self.collection else "媒体集合"}：'
+                            f'{self.collection.title if self.collection else ""}    详情解析 {index}/{total}'
+                        )
+                elif event_name == 'detail_finished':
+                    if self.collection:
+                        self.collection_value.set(
+                            f'{self.collection.collection_type}：{self.collection.title}    '
+                            f'共 {len(self.collection.items)} 个视频（详情解析完成）'
+                        )
+                    self.status_value.set('详情解析完成，可以选择视频并下载。')
+                elif event_name == 'thumbnail_loaded' and isinstance(payload, tuple):
+                    item, image, error = payload
+                    if item is not self.selected_item:
+                        continue
+                    if error or image is None:
+                        self.thumbnail_preview_label.configure(text='封面加载失败', image='')
+                    else:
+                        try:
+                            from PIL import ImageTk
+                            self.thumbnail_photo = ImageTk.PhotoImage(image=image, master=self.root)
+                            self.thumbnail_preview_label.configure(image=self.thumbnail_photo, text='')
+                        except Exception:
+                            self.thumbnail_preview_label.configure(text='无法显示封面', image='')
                 elif event_name == 'task_started' and isinstance(payload, DownloadTask):
                     self._update_item_status(payload)
                     self.status_value.set(f'开始下载：{payload.item.title}')
@@ -365,6 +478,7 @@ class MediaHubWindow:
 
     def _handle_close(self) -> None:
         """关闭窗口前确认是否需要取消正在执行的队列。"""
+        self.detail_cancel_event.set()
         if self.download_queue and self.download_queue.is_running():
             should_close = messagebox.askyesno(APP_NAME, '下载队列仍在运行，确定取消并退出吗？')
             if not should_close:

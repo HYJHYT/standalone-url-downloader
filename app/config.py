@@ -43,3 +43,8 @@ def resolve_data_dir() -> Path:
 def resolve_history_database() -> Path:
     """返回下载历史 SQLite 数据库路径。"""
     return resolve_data_dir() / 'history.sqlite3'
+
+
+def resolve_thumbnail_cache_dir() -> Path:
+    """返回封面图片缓存目录。"""
+    return resolve_data_dir() / 'thumbnails'
