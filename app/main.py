@@ -62,8 +62,8 @@ class MediaHubWindow:
     def _build_window(self) -> None:
         """配置窗口尺寸、标题和关闭行为。"""
         self.root.title(APP_NAME)
-        self.root.geometry('980x680')
-        self.root.minsize(820, 560)
+        self.root.geometry('1080x820')
+        self.root.minsize(900, 720)
         self.root.protocol('WM_DELETE_WINDOW', self._handle_close)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -73,7 +73,8 @@ class MediaHubWindow:
         container = ttk.Frame(self.root, padding=24)
         container.grid(row=0, column=0, sticky='nsew')
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(4, weight=1)
+        # 为视频列表保留最小高度，避免窗口较小时被其他控件挤压成不可见。
+        container.rowconfigure(4, weight=1, minsize=180)
 
         ttk.Label(container, text=APP_NAME, font=('Microsoft YaHei UI', 20, 'bold')).grid(
             row=0, column=0, sticky='w', pady=(0, 16)
@@ -93,7 +94,7 @@ class MediaHubWindow:
         list_panel = ttk.Frame(container)
         list_panel.grid(row=4, column=0, sticky='nsew')
         list_panel.columnconfigure(0, weight=1)
-        list_panel.rowconfigure(0, weight=1)
+        list_panel.rowconfigure(0, weight=1, minsize=180)
         columns = ('title', 'uploader', 'duration', 'date', 'status')
         self.media_tree = ttk.Treeview(list_panel, columns=columns, show='headings', selectmode='extended')
         headings = {
