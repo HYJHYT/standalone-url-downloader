@@ -4,6 +4,7 @@ import threading
 from collections.abc import Callable
 
 from app.downloader import UserCancelledError, VideoDownloader, build_friendly_error
+from app.history import DownloadHistory
 from app.models import DownloadTask
 
 
@@ -17,6 +18,7 @@ class DownloadQueue:
         on_finished: Callable[[DownloadTask, str], None],
         on_failed: Callable[[DownloadTask, str], None],
         on_all_finished: Callable[[], None],
+        history: DownloadHistory,
     ):
         """保存队列回调并初始化线程和取消状态。"""
         self._on_started = on_started
@@ -24,6 +26,7 @@ class DownloadQueue:
         self._on_finished = on_finished
         self._on_failed = on_failed
         self._on_all_finished = on_all_finished
+        self._history = history
         self._tasks: list[DownloadTask] = []
         self._current_downloader: VideoDownloader | None = None
         self._cancel_event = threading.Event()
@@ -60,13 +63,22 @@ class DownloadQueue:
                 if self._cancel_event.is_set():
                     task.status = '已取消'
                     continue
+                existing_file = self._history.find_existing(task.item)
+                if existing_file:
+                    task.status = '已存在'
+                    task.error = str(existing_file)
+                    self._on_finished(task, task.item.title)
+                    continue
                 task.status = '下载中'
                 self._on_started(task)
                 self._current_downloader = VideoDownloader(
                     lambda progress, current_task=task: self._on_progress(current_task, progress)
                 )
                 try:
-                    title = self._current_downloader.download(task.item.url, output_dir)
+                    title, file_path = self._current_downloader.download(
+                        task.item.url, output_dir, task.options
+                    )
+                    self._history.record_success(task.item, file_path)
                     task.status = '已完成'
                     self._on_finished(task, title)
                 except UserCancelledError:

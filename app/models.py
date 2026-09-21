@@ -40,9 +40,25 @@ class MediaCollection:
 
 
 @dataclass(slots=True)
+class DownloadOptions:
+    """描述单个下载任务使用的视频、音频和附加资源选项。"""
+
+    quality: str = 'best'
+    mode: str = 'video_audio'
+    write_thumbnail: bool = False
+    write_subtitles: bool = False
+    embed_thumbnail: bool = False
+    embed_subs: bool = False
+    subtitles_lang: str = 'zh-Hans,zh,en'
+    audio_format: str = 'm4a'
+    output_template: str = '%(title).180B [%(id)s].%(ext)s'
+
+
+@dataclass(slots=True)
 class DownloadTask:
     """表示队列中的一个下载任务。"""
 
     item: MediaItem
+    options: DownloadOptions = field(default_factory=DownloadOptions)
     status: str = '等待中'
     error: str = ''

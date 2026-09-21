@@ -7,10 +7,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from app.config import APP_NAME, resolve_ffmpeg_location
+from app.config import APP_NAME, resolve_ffmpeg_location, resolve_history_database
 from app.downloader import DownloadProgress, build_friendly_error
 from app.extractor import MediaExtractor
-from app.models import DownloadTask, MediaCollection, MediaItem
+from app.history import DownloadHistory
+from app.models import DownloadOptions, DownloadTask, MediaCollection, MediaItem
 from app.task_queue import DownloadQueue
 
 
@@ -25,6 +26,7 @@ class MediaHubWindow:
         self.collection: MediaCollection | None = None
         self.row_items: dict[str, MediaItem] = {}
         self.download_queue: DownloadQueue | None = None
+        self.history = DownloadHistory(resolve_history_database())
         self.url_value = tk.StringVar()
         self.output_value = tk.StringVar(value=str(Path.home() / 'Downloads'))
         self.status_value = tk.StringVar(value='请输入视频、用户主页、播放列表或搜索结果 URL')
@@ -32,6 +34,13 @@ class MediaHubWindow:
         self.progress_value = tk.DoubleVar(value=0.0)
         self.progress_text = tk.StringVar(value='0.0%')
         self.detail_value = tk.StringVar(value='速度：--    剩余时间：--')
+        self.detail_title_value = tk.StringVar(value='未选择视频')
+        self.detail_info_value = tk.StringVar(value='选择列表中的视频查看详细信息')
+        self.thumbnail_value = tk.StringVar(value='')
+        self.quality_value = tk.StringVar(value='best')
+        self.mode_value = tk.StringVar(value='video_audio')
+        self.thumbnail_option = tk.BooleanVar(value=False)
+        self.subtitle_option = tk.BooleanVar(value=False)
         self._build_window()
         self._build_widgets()
         self.root.after(100, self._poll_events)
@@ -87,6 +96,18 @@ class MediaHubWindow:
         scrollbar = ttk.Scrollbar(list_panel, orient='vertical', command=self.media_tree.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
         self.media_tree.configure(yscrollcommand=scrollbar.set)
+        self.media_tree.bind('<<TreeviewSelect>>', self._handle_item_selected)
+
+        detail_panel = ttk.LabelFrame(container, text='媒体详情', padding=8)
+        detail_panel.grid(row=3, column=0, sticky='ew', pady=(0, 8))
+        detail_panel.columnconfigure(0, weight=1)
+        ttk.Label(detail_panel, textvariable=self.detail_title_value, font=('Microsoft YaHei UI', 10, 'bold')).grid(
+            row=0, column=0, sticky='w'
+        )
+        ttk.Label(detail_panel, textvariable=self.detail_info_value).grid(row=1, column=0, sticky='w', pady=(3, 0))
+        ttk.Label(detail_panel, textvariable=self.thumbnail_value, foreground='#666666').grid(
+            row=2, column=0, sticky='w', pady=(3, 0)
+        )
 
         selection_row = ttk.Frame(container)
         selection_row.grid(row=5, column=0, sticky='w', pady=(8, 10))
@@ -97,8 +118,27 @@ class MediaHubWindow:
         self.invert_selection_button = ttk.Button(selection_row, text='反选', command=self._invert_selection)
         self.invert_selection_button.grid(row=0, column=2)
 
+        options_row = ttk.Frame(container)
+        options_row.grid(row=6, column=0, sticky='w', pady=(0, 8))
+        ttk.Label(options_row, text='画质').grid(row=0, column=0, padx=(0, 5))
+        self.quality_combo = ttk.Combobox(
+            options_row, textvariable=self.quality_value,
+            values=('best', '2160', '1440', '1080', '720'), width=8, state='readonly'
+        )
+        self.quality_combo.grid(row=0, column=1, padx=(0, 12))
+        ttk.Label(options_row, text='模式').grid(row=0, column=2, padx=(0, 5))
+        self.mode_combo = ttk.Combobox(
+            options_row, textvariable=self.mode_value,
+            values=('video_audio', 'video', 'audio'), width=13, state='readonly'
+        )
+        self.mode_combo.grid(row=0, column=3, padx=(0, 12))
+        self.thumbnail_check = ttk.Checkbutton(options_row, text='下载封面', variable=self.thumbnail_option)
+        self.thumbnail_check.grid(row=0, column=4, padx=(0, 10))
+        self.subtitle_check = ttk.Checkbutton(options_row, text='下载字幕', variable=self.subtitle_option)
+        self.subtitle_check.grid(row=0, column=5)
+
         output_row = ttk.Frame(container)
-        output_row.grid(row=6, column=0, sticky='ew', pady=(0, 10))
+        output_row.grid(row=7, column=0, sticky='ew', pady=(0, 10))
         output_row.columnconfigure(1, weight=1)
         ttk.Label(output_row, text='保存位置').grid(row=0, column=0, padx=(0, 8))
         self.output_entry = ttk.Entry(output_row, textvariable=self.output_value)
@@ -107,7 +147,7 @@ class MediaHubWindow:
         self.browse_button.grid(row=0, column=2, padx=(8, 0))
 
         progress_panel = ttk.LabelFrame(container, text='下载状态', padding=12)
-        progress_panel.grid(row=7, column=0, sticky='ew')
+        progress_panel.grid(row=8, column=0, sticky='ew')
         progress_panel.columnconfigure(0, weight=1)
         ttk.Label(progress_panel, textvariable=self.status_value).grid(row=0, column=0, sticky='w')
         self.progress_bar = ttk.Progressbar(progress_panel, variable=self.progress_value, maximum=100)
@@ -116,7 +156,7 @@ class MediaHubWindow:
         ttk.Label(progress_panel, textvariable=self.detail_value).grid(row=2, column=0, sticky='w')
 
         button_row = ttk.Frame(container)
-        button_row.grid(row=8, column=0, sticky='e', pady=(14, 0))
+        button_row.grid(row=9, column=0, sticky='e', pady=(14, 0))
         self.open_button = ttk.Button(button_row, text='打开目录', command=self._open_output_dir)
         self.open_button.grid(row=0, column=0, padx=(0, 8))
         self.cancel_button = ttk.Button(button_row, text='取消队列', command=self._cancel_queue, state='disabled')
@@ -144,6 +184,10 @@ class MediaHubWindow:
         self.parse_button.configure(state='disabled' if busy else 'normal')
         self.output_entry.configure(state=entry_state)
         self.browse_button.configure(state=entry_state)
+        self.quality_combo.configure(state='disabled' if busy else 'readonly')
+        self.mode_combo.configure(state='disabled' if busy else 'readonly')
+        self.thumbnail_check.configure(state=entry_state)
+        self.subtitle_check.configure(state=entry_state)
         self.download_button.configure(state='disabled' if busy else 'normal')
         selection_state = 'disabled' if busy else 'normal'
         self.select_all_button.configure(state=selection_state)
@@ -199,6 +243,20 @@ class MediaHubWindow:
             self.media_tree.selection_set('0')
         self.status_value.set('解析完成，请选择需要下载的视频。')
 
+    def _handle_item_selected(self, _event: object) -> None:
+        """响应媒体列表选择并显示所选视频的详细信息。"""
+        selected_rows = self.media_tree.selection()
+        if not selected_rows:
+            return
+        item = self.row_items.get(selected_rows[0])
+        if item is None:
+            return
+        self.detail_title_value.set(item.title)
+        self.detail_info_value.set(
+            f'作者：{item.uploader or "--"}    时长：{item.duration_text()}    发布时间：{item.upload_date}'
+        )
+        self.thumbnail_value.set(f'封面：{item.thumbnail}' if item.thumbnail else '该视频未提供封面地址')
+
     def _select_all(self) -> None:
         """选择当前列表中的全部视频。"""
         self.media_tree.selection_set(self.media_tree.get_children())
@@ -226,13 +284,21 @@ class MediaHubWindow:
         if resolve_ffmpeg_location() is None:
             messagebox.showerror(APP_NAME, '未找到 ffmpeg 和 ffprobe，请重新构建程序。')
             return
-        tasks = [DownloadTask(self.row_items[row_id]) for row_id in selected_rows]
+        options = DownloadOptions(
+            quality=self.quality_value.get(),
+            mode=self.mode_value.get(),
+            write_thumbnail=self.thumbnail_option.get(),
+            write_subtitles=self.subtitle_option.get(),
+            embed_thumbnail=self.thumbnail_option.get(),
+        )
+        tasks = [DownloadTask(self.row_items[row_id], options=options) for row_id in selected_rows]
         self.download_queue = DownloadQueue(
             on_started=lambda task: self.event_queue.put(('task_started', task)),
             on_progress=lambda task, progress: self.event_queue.put(('task_progress', (task, progress))),
             on_finished=lambda task, title: self.event_queue.put(('task_finished', (task, title))),
             on_failed=lambda task, error: self.event_queue.put(('task_failed', (task, error))),
             on_all_finished=lambda: self.event_queue.put(('queue_finished', None)),
+            history=self.history,
         )
         self._set_busy_state(True)
         self.status_value.set(f'已加入 {len(tasks)} 个下载任务。')

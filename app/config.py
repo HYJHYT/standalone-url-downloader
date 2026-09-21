@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -28,3 +29,17 @@ def resolve_ffmpeg_location() -> Path | None:
     if ffmpeg_path and ffprobe_path:
         return Path(ffmpeg_path).resolve().parent
     return None
+
+
+def resolve_data_dir() -> Path:
+    """解析用户数据目录，避免把数据库写入打包程序目录。"""
+    # APPDATA 是 Windows 用户级应用数据目录，用于保存下载历史等可写数据。
+    app_data = os.environ.get('APPDATA')
+    if app_data:
+        return Path(app_data) / 'HY MediaHub'
+    return Path.home() / '.hy-mediahub'
+
+
+def resolve_history_database() -> Path:
+    """返回下载历史 SQLite 数据库路径。"""
+    return resolve_data_dir() / 'history.sqlite3'

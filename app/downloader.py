@@ -13,6 +13,8 @@ from app.config import (
     DEFAULT_SOCKET_TIMEOUT,
     resolve_ffmpeg_location,
 )
+from app.format_selector import build_format_selector
+from app.models import DownloadOptions
 
 
 class UserCancelledError(Exception):
@@ -133,16 +135,16 @@ class VideoDownloader:
             eta_text=_format_eta(data.get('eta')),
         ))
 
-    def _build_options(self, output_dir: Path) -> dict:
+    def _build_options(self, output_dir: Path, options: DownloadOptions) -> dict:
         """构建适合桌面工具的 yt-dlp 下载参数。"""
         ffmpeg_location = resolve_ffmpeg_location()
         if ffmpeg_location is None:
             raise RuntimeError('未找到 ffmpeg 和 ffprobe，请重新构建程序或将它们加入 PATH')
-        return {
-            'format': 'bv*+ba/b',
+        download_options = {
+            'format': build_format_selector(options),
             'merge_output_format': 'mp4',
             'noplaylist': True,
-            'outtmpl': str(output_dir / '%(title).180B [%(id)s].%(ext)s'),
+            'outtmpl': str(output_dir / options.output_template),
             'windowsfilenames': True,
             'progress_hooks': [self._emit_progress],
             'ffmpeg_location': str(ffmpeg_location),
@@ -156,19 +158,54 @@ class VideoDownloader:
             'quiet': True,
             'no_warnings': True,
         }
+        if options.mode == 'audio':
+            download_options.update({
+                'extractaudio': True,
+                'audioformat': options.audio_format,
+            })
+        if options.write_thumbnail:
+            download_options['writethumbnail'] = True
+        if options.write_subtitles:
+            download_options.update({
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': options.subtitles_lang.split(','),
+            })
+        if options.embed_thumbnail:
+            download_options['embedthumbnail'] = True
+        if options.embed_subs:
+            download_options['embedsubs'] = True
+        return download_options
 
-    def download(self, url: str, output_dir: str | Path) -> str:
+    def _resolve_downloaded_file(self, output_dir: Path, info: dict, prepared_path: Path) -> Path:
+        """查找后处理或合并后实际生成的媒体文件。"""
+        candidates = [prepared_path]
+        for suffix in ('.mp4', '.mkv', '.webm', '.m4a', '.mp3'):
+            candidates.append(prepared_path.with_suffix(suffix))
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        video_id = str(info.get('id') or '')
+        if video_id:
+            matched_files = list(output_dir.glob(f'* [{video_id}].*'))
+            if matched_files:
+                return matched_files[0]
+        return prepared_path
+
+    def download(self, url: str, output_dir: str | Path, options: DownloadOptions | None = None) -> tuple[str, Path]:
         """下载单个视频到指定目录并返回视频标题。"""
         normalized_url = validate_video_url(url)
         resolved_output_dir = Path(output_dir).expanduser().resolve()
         resolved_output_dir.mkdir(parents=True, exist_ok=True)
         self._cancel_event.clear()
+        download_options = options or DownloadOptions()
         try:
-            with yt_dlp.YoutubeDL(self._build_options(resolved_output_dir)) as downloader:
+            with yt_dlp.YoutubeDL(self._build_options(resolved_output_dir, download_options)) as downloader:
                 info = downloader.extract_info(normalized_url, download=True)
                 self._raise_if_cancelled()
                 self._title = str(info.get('title') or self._title)
-                return self._title
+                prepared_path = Path(downloader.prepare_filename(info))
+                file_path = self._resolve_downloaded_file(resolved_output_dir, info, prepared_path)
+                return self._title, file_path
         except DownloadCancelled as exc:
             raise UserCancelledError('下载已取消') from exc
-
