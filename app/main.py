@@ -34,6 +34,9 @@ class MediaHubWindow:
         self.thumbnail_thread: threading.Thread | None = None
         self.thumbnail_photo = None
         self.selected_item: MediaItem | None = None
+        self.current_page = 1
+        self.page_size = 50
+        self.detail_generation = 0
         self.collection: MediaCollection | None = None
         self.row_items: dict[str, MediaItem] = {}
         self.download_queue: DownloadQueue | None = None
@@ -131,8 +134,29 @@ class MediaHubWindow:
         self.invert_selection_button = ttk.Button(selection_row, text='反选', command=self._invert_selection)
         self.invert_selection_button.grid(row=0, column=2)
 
+        pagination_row = ttk.Frame(container)
+        pagination_row.grid(row=6, column=0, sticky='w', pady=(0, 8))
+        self.first_page_button = ttk.Button(pagination_row, text='首页', command=lambda: self._change_page(1))
+        self.first_page_button.grid(row=0, column=0, padx=(0, 6))
+        self.previous_page_button = ttk.Button(pagination_row, text='上一页', command=self._previous_page)
+        self.previous_page_button.grid(row=0, column=1, padx=(0, 6))
+        self.page_value = tk.StringVar(value='第 1 / 1 页')
+        ttk.Label(pagination_row, textvariable=self.page_value).grid(row=0, column=2, padx=(0, 6))
+        self.next_page_button = ttk.Button(pagination_row, text='下一页', command=self._next_page)
+        self.next_page_button.grid(row=0, column=3, padx=(0, 6))
+        self.last_page_button = ttk.Button(pagination_row, text='末页', command=self._last_page)
+        self.last_page_button.grid(row=0, column=4, padx=(0, 12))
+        ttk.Label(pagination_row, text='每页').grid(row=0, column=5, padx=(0, 5))
+        self.page_size_value = tk.StringVar(value='50')
+        self.page_size_combo = ttk.Combobox(
+            pagination_row, textvariable=self.page_size_value,
+            values=('30', '50', '100'), width=5, state='readonly'
+        )
+        self.page_size_combo.grid(row=0, column=6)
+        self.page_size_combo.bind('<<ComboboxSelected>>', self._change_page_size)
+
         options_row = ttk.Frame(container)
-        options_row.grid(row=6, column=0, sticky='w', pady=(0, 8))
+        options_row.grid(row=7, column=0, sticky='w', pady=(0, 8))
         ttk.Label(options_row, text='画质').grid(row=0, column=0, padx=(0, 5))
         self.quality_combo = ttk.Combobox(
             options_row, textvariable=self.quality_value,
@@ -151,7 +175,7 @@ class MediaHubWindow:
         self.subtitle_check.grid(row=0, column=5)
 
         output_row = ttk.Frame(container)
-        output_row.grid(row=7, column=0, sticky='ew', pady=(0, 10))
+        output_row.grid(row=8, column=0, sticky='ew', pady=(0, 10))
         output_row.columnconfigure(1, weight=1)
         ttk.Label(output_row, text='保存位置').grid(row=0, column=0, padx=(0, 8))
         self.output_entry = ttk.Entry(output_row, textvariable=self.output_value)
@@ -160,7 +184,7 @@ class MediaHubWindow:
         self.browse_button.grid(row=0, column=2, padx=(8, 0))
 
         progress_panel = ttk.LabelFrame(container, text='下载状态', padding=12)
-        progress_panel.grid(row=8, column=0, sticky='ew')
+        progress_panel.grid(row=9, column=0, sticky='ew')
         progress_panel.columnconfigure(0, weight=1)
         ttk.Label(progress_panel, textvariable=self.status_value).grid(row=0, column=0, sticky='w')
         self.progress_bar = ttk.Progressbar(progress_panel, variable=self.progress_value, maximum=100)
@@ -169,7 +193,7 @@ class MediaHubWindow:
         ttk.Label(progress_panel, textvariable=self.detail_value).grid(row=2, column=0, sticky='w')
 
         button_row = ttk.Frame(container)
-        button_row.grid(row=9, column=0, sticky='e', pady=(14, 0))
+        button_row.grid(row=10, column=0, sticky='e', pady=(14, 0))
         self.open_button = ttk.Button(button_row, text='打开目录', command=self._open_output_dir)
         self.open_button.grid(row=0, column=0, padx=(0, 8))
         self.cancel_button = ttk.Button(button_row, text='取消队列', command=self._cancel_queue, state='disabled')
@@ -206,7 +230,15 @@ class MediaHubWindow:
         self.select_all_button.configure(state=selection_state)
         self.clear_selection_button.configure(state=selection_state)
         self.invert_selection_button.configure(state=selection_state)
+        self.first_page_button.configure(state=selection_state)
+        self.previous_page_button.configure(state=selection_state)
+        self.next_page_button.configure(state=selection_state)
+        self.last_page_button.configure(state=selection_state)
+        self.page_size_combo.configure(state='disabled' if busy else 'readonly')
         self.cancel_button.configure(state='normal' if busy else 'disabled')
+        if not busy and self.collection is not None:
+            total_pages = max(1, (len(self.collection.items) + self.page_size - 1) // self.page_size)
+            self._update_pagination_buttons(total_pages)
 
     def _start_parse(self) -> None:
         """校验 URL 并在后台线程中解析媒体集合。"""
@@ -245,48 +277,103 @@ class MediaHubWindow:
 
     def _show_collection(self, collection: MediaCollection) -> None:
         """将解析结果填充到媒体列表中。"""
+        self.collection = collection
+        self.current_page = 1
+        self._render_current_page()
+
+    def _render_current_page(self) -> None:
+        """只渲染当前页的视频，并启动当前页详情补全。"""
+        if self.collection is None:
+            return
+        collection = self.collection
+        self.detail_cancel_event.set()
+        self.detail_generation += 1
         self._clear_tree()
         self.collection = collection
+        total_items = len(self.collection.items)
+        total_pages = max(1, (total_items + self.page_size - 1) // self.page_size)
+        self.current_page = min(max(1, self.current_page), total_pages)
+        start_index = (self.current_page - 1) * self.page_size
+        page_items = self.collection.items[start_index:start_index + self.page_size]
         self.collection_value.set(
-            f'{collection.collection_type}：{collection.title}    共 {len(collection.items)} 个视频'
+            f'{self.collection.collection_type}：{self.collection.title}    '
+            f'共 {total_items} 个视频    第 {self.current_page} / {total_pages} 页'
         )
-        for index, item in enumerate(collection.items):
+        for index, item in enumerate(page_items):
             row_id = str(index)
             self.row_items[row_id] = item
+            status = item.status if item.detail_status == '已完成' else '详情解析中'
             self.media_tree.insert('', 'end', iid=row_id, values=(
-                item.title, item.uploader or '--', item.duration_text(), item.upload_date, item.status,
+                item.title, item.uploader or '--', item.duration_text(), item.upload_date, status,
             ))
-        if collection.items:
+        self.page_value.set(f'第 {self.current_page} / {total_pages} 页')
+        self._update_pagination_buttons(total_pages)
+        if page_items:
             self.media_tree.selection_set('0')
-        self.status_value.set('解析完成，请选择需要下载的视频。')
-        self._start_detail_enrichment(collection)
+        self.status_value.set(f'正在获取第 {self.current_page} 页的视频详情…')
+        self._start_detail_enrichment(page_items, self.detail_generation)
 
-    def _start_detail_enrichment(self, collection: MediaCollection) -> None:
-        """启动后台线程补全集合中每个视频的详细信息。"""
+    def _update_pagination_buttons(self, total_pages: int) -> None:
+        """根据当前页码切换分页按钮状态。"""
+        self.first_page_button.configure(state='normal' if self.current_page > 1 else 'disabled')
+        self.previous_page_button.configure(state='normal' if self.current_page > 1 else 'disabled')
+        self.next_page_button.configure(state='normal' if self.current_page < total_pages else 'disabled')
+        self.last_page_button.configure(state='normal' if self.current_page < total_pages else 'disabled')
+
+    def _change_page(self, page: int) -> None:
+        """切换到指定页并重新加载该页详情。"""
+        if self.collection is None:
+            return
+        self.current_page = page
+        self._render_current_page()
+
+    def _previous_page(self) -> None:
+        """切换到上一页。"""
+        self._change_page(self.current_page - 1)
+
+    def _next_page(self) -> None:
+        """切换到下一页。"""
+        self._change_page(self.current_page + 1)
+
+    def _last_page(self) -> None:
+        """切换到最后一页。"""
+        if self.collection is None:
+            return
+        total_pages = max(1, (len(self.collection.items) + self.page_size - 1) // self.page_size)
+        self._change_page(total_pages)
+
+    def _change_page_size(self, _event: object) -> None:
+        """应用新的每页数量并回到第一页。"""
+        self.page_size = int(self.page_size_value.get())
+        self.current_page = 1
+        self._render_current_page()
+
+    def _start_detail_enrichment(self, items: list[MediaItem], generation: int) -> None:
+        """启动后台线程补全当前页视频的详细信息。"""
         self.detail_cancel_event.clear()
         self.detail_thread = threading.Thread(
             target=self._run_detail_enrichment,
-            args=(collection,),
+            args=(items, generation),
             daemon=True,
             name='media-detail-worker',
         )
         self.detail_thread.start()
 
-    def _run_detail_enrichment(self, collection: MediaCollection) -> None:
-        """后台逐项解析视频详情并向界面发送更新事件。"""
+    def _run_detail_enrichment(self, items: list[MediaItem], generation: int) -> None:
+        """后台逐项解析当前页详情并向界面发送更新事件。"""
         extractor = MediaExtractor(resolve_ffmpeg_location())
-        total = len(collection.items)
-        for index, item in enumerate(collection.items, start=1):
+        total = len(items)
+        for index, item in enumerate(items, start=1):
             if self.detail_cancel_event.is_set():
                 break
             try:
                 item.detail_status = '解析中'
                 extractor.enrich_item(item)
-                self.event_queue.put(('detail_item', (index, total, item, None)))
+                self.event_queue.put(('detail_item', (generation, index, total, item, None)))
             except Exception as exc:
                 item.detail_status = '失败'
-                self.event_queue.put(('detail_item', (index, total, item, build_friendly_error(exc))))
-        self.event_queue.put(('detail_finished', None))
+                self.event_queue.put(('detail_item', (generation, index, total, item, build_friendly_error(exc))))
+        self.event_queue.put(('detail_finished', generation))
 
     def _update_detail_item(self, item: MediaItem, error: str | None) -> None:
         """将一个视频的详情解析结果同步到列表和当前详情面板。"""
@@ -418,18 +505,20 @@ class MediaHubWindow:
                     self._set_busy_state(False)
                     messagebox.showerror(APP_NAME, str(payload))
                 elif event_name == 'detail_item' and isinstance(payload, tuple):
-                    index, total, item, error = payload
+                    generation, index, total, item, error = payload
+                    if generation != self.detail_generation:
+                        continue
                     if isinstance(item, MediaItem):
                         self._update_detail_item(item, error)
                         self.collection_value.set(
                             f'{self.collection.collection_type if self.collection else "媒体集合"}：'
                             f'{self.collection.title if self.collection else ""}    详情解析 {index}/{total}'
                         )
-                elif event_name == 'detail_finished':
+                elif event_name == 'detail_finished' and payload == self.detail_generation:
                     if self.collection:
                         self.collection_value.set(
                             f'{self.collection.collection_type}：{self.collection.title}    '
-                            f'共 {len(self.collection.items)} 个视频（详情解析完成）'
+                            f'共 {len(self.collection.items)} 个视频    第 {self.current_page} 页详情完成'
                         )
                     self.status_value.set('详情解析完成，可以选择视频并下载。')
                 elif event_name == 'thumbnail_loaded' and isinstance(payload, tuple):
