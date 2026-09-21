@@ -34,7 +34,7 @@ function Prepare-Ffmpeg {
     }
     if (Test-Path $extractDir) {
         if (-not (Test-PathInsideProject $extractDir)) {
-            throw 'Refusing to clean a path outside the standalone project.'
+            throw 'Refusing to clean a path outside the HY MediaHub project.'
         }
         Remove-Item -LiteralPath $extractDir -Recurse -Force
     }
@@ -66,11 +66,11 @@ python -m PyInstaller `
     --clean `
     --onefile `
     --windowed `
-    --name 'URLVideoDownloader' `
+    --name 'HY-MediaHub' `
     --collect-all yt_dlp `
     --add-binary "$(Join-Path $vendorDir 'ffmpeg.exe');ffmpeg" `
     --add-binary "$(Join-Path $vendorDir 'ffprobe.exe');ffmpeg" `
     run_app.py
 
 Write-Host '==> 4/4 Build completed'
-Write-Host "Output: $(Join-Path $distDir 'URLVideoDownloader.exe')"
+Write-Host "Output: $(Join-Path $distDir 'HY-MediaHub.exe')"

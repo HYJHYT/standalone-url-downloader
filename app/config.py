@@ -2,7 +2,8 @@ import shutil
 import sys
 from pathlib import Path
 
-APP_NAME = 'URL 视频下载器'
+# 应用展示名称，窗口标题和打包程序名称统一使用该名称。
+APP_NAME = 'HY MediaHub'
 DEFAULT_SOCKET_TIMEOUT = 60
 DEFAULT_RETRIES = 10
 DEFAULT_FRAGMENT_RETRIES = 10
@@ -27,4 +28,3 @@ def resolve_ffmpeg_location() -> Path | None:
     if ffmpeg_path and ffprobe_path:
         return Path(ffmpeg_path).resolve().parent
     return None
-
