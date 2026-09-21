@@ -18,7 +18,7 @@ from app.extractor import MediaExtractor
 from app.history import DownloadHistory
 from app.models import DownloadOptions, DownloadTask, MediaCollection, MediaItem
 from app.task_queue import DownloadQueue
-from app.thumbnail import load_thumbnail_image
+from app.thumbnail import clear_thumbnail_cache, get_thumbnail_cache_usage, load_thumbnail_image
 
 
 class MediaHubWindow:
@@ -95,9 +95,10 @@ class MediaHubWindow:
         list_panel.grid(row=4, column=0, sticky='nsew')
         list_panel.columnconfigure(0, weight=1)
         list_panel.rowconfigure(0, weight=1, minsize=180)
-        columns = ('title', 'uploader', 'duration', 'date', 'status')
+        columns = ('selected', 'title', 'uploader', 'duration', 'date', 'status')
         self.media_tree = ttk.Treeview(list_panel, columns=columns, show='headings', selectmode='extended')
         headings = {
+            'selected': ('选择', 55),
             'title': ('标题', 360),
             'uploader': ('作者', 150),
             'duration': ('时长', 85),
@@ -106,12 +107,13 @@ class MediaHubWindow:
         }
         for column, (heading, width) in headings.items():
             self.media_tree.heading(column, text=heading)
-            self.media_tree.column(column, width=width, anchor='w')
+            self.media_tree.column(column, width=width, anchor='center' if column == 'selected' else 'w')
         self.media_tree.grid(row=0, column=0, sticky='nsew')
         scrollbar = ttk.Scrollbar(list_panel, orient='vertical', command=self.media_tree.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
         self.media_tree.configure(yscrollcommand=scrollbar.set)
         self.media_tree.bind('<<TreeviewSelect>>', self._handle_item_selected)
+        self.media_tree.bind('<Button-1>', self._toggle_row_selection, add='+')
 
         detail_panel = ttk.LabelFrame(container, text='媒体详情', padding=8)
         detail_panel.grid(row=3, column=0, sticky='ew', pady=(0, 8))
@@ -197,10 +199,12 @@ class MediaHubWindow:
         button_row.grid(row=10, column=0, sticky='e', pady=(14, 0))
         self.open_button = ttk.Button(button_row, text='打开目录', command=self._open_output_dir)
         self.open_button.grid(row=0, column=0, padx=(0, 8))
+        self.clear_cache_button = ttk.Button(button_row, text='清理封面缓存', command=self._clear_thumbnail_cache)
+        self.clear_cache_button.grid(row=0, column=1, padx=(0, 8))
         self.cancel_button = ttk.Button(button_row, text='取消队列', command=self._cancel_queue, state='disabled')
-        self.cancel_button.grid(row=0, column=1, padx=(0, 8))
+        self.cancel_button.grid(row=0, column=2, padx=(0, 8))
         self.download_button = ttk.Button(button_row, text='下载选中项目', command=self._start_downloads)
-        self.download_button.grid(row=0, column=2)
+        self.download_button.grid(row=0, column=3)
         self.url_entry.focus_set()
 
     def _choose_output_dir(self) -> None:
@@ -215,6 +219,27 @@ class MediaHubWindow:
         output_dir.mkdir(parents=True, exist_ok=True)
         os.startfile(str(output_dir.resolve()))
 
+    def _clear_thumbnail_cache(self) -> None:
+        """显示封面缓存占用并在确认后删除缓存图片。"""
+        cache_dir = resolve_thumbnail_cache_dir()
+        file_count, total_bytes = get_thumbnail_cache_usage(cache_dir)
+        if file_count == 0:
+            messagebox.showinfo(APP_NAME, '当前没有封面缓存。')
+            return
+        size_mb = total_bytes / 1024 / 1024
+        should_clear = messagebox.askyesno(
+            APP_NAME,
+            f'当前封面缓存：{file_count} 个文件，占用 {size_mb:.1f} MB。\n\n'
+            '确定删除封面缓存吗？\n下载历史和已下载视频不会被删除。',
+        )
+        if not should_clear:
+            return
+        deleted_count, deleted_bytes = clear_thumbnail_cache(cache_dir)
+        self.thumbnail_photo = None
+        self.thumbnail_preview_label.configure(text='暂无封面', image='')
+        self.status_value.set(f'已清理 {deleted_count} 个封面缓存，释放 {deleted_bytes / 1024 / 1024:.1f} MB。')
+        messagebox.showinfo(APP_NAME, f'已清理 {deleted_count} 个封面缓存。')
+
     def _set_busy_state(self, busy: bool) -> None:
         """根据解析或下载状态切换控件可用性。"""
         entry_state = 'disabled' if busy else 'normal'
@@ -222,6 +247,7 @@ class MediaHubWindow:
         self.parse_button.configure(state='disabled' if busy else 'normal')
         self.output_entry.configure(state=entry_state)
         self.browse_button.configure(state=entry_state)
+        self.clear_cache_button.configure(state='disabled' if busy else 'normal')
         self.quality_combo.configure(state='disabled' if busy else 'readonly')
         self.mode_combo.configure(state='disabled' if busy else 'readonly')
         self.thumbnail_check.configure(state=entry_state)
@@ -276,6 +302,26 @@ class MediaHubWindow:
         self.row_items.clear()
         self.collection = None
 
+    def _toggle_row_selection(self, event: tk.Event) -> None:
+        """点击列表行时切换该视频的勾选状态。"""
+        row_id = self.media_tree.identify_row(event.y)
+        item = self.row_items.get(row_id)
+        if item is None:
+            return
+        item.selected = not item.selected
+        self._refresh_row(row_id, item)
+
+    def _refresh_row(self, row_id: str, item: MediaItem) -> None:
+        """刷新列表行的勾选标记和媒体信息。"""
+        self.media_tree.item(row_id, values=(
+            '☑' if item.selected else '☐',
+            item.title,
+            item.uploader or '--',
+            item.duration_text(),
+            item.upload_date,
+            item.status,
+        ))
+
     def _show_collection(self, collection: MediaCollection) -> None:
         """将解析结果填充到媒体列表中。"""
         self.collection = collection
@@ -305,6 +351,7 @@ class MediaHubWindow:
             self.row_items[row_id] = item
             status = item.status if item.detail_status == '已完成' else '详情解析中'
             self.media_tree.insert('', 'end', iid=row_id, values=(
+                '☑' if item.selected else '☐',
                 item.title, item.uploader or '--', item.duration_text(), item.upload_date, status,
             ))
         self.page_value.set(f'第 {self.current_page} / {total_pages} 页')
@@ -382,6 +429,7 @@ class MediaHubWindow:
             if row_item is item:
                 status = '详情失败' if error else item.status
                 self.media_tree.item(row_id, values=(
+                    '☑' if item.selected else '☐',
                     item.title, item.uploader or '--', item.duration_text(), item.upload_date, status,
                 ))
                 break
@@ -432,23 +480,27 @@ class MediaHubWindow:
 
     def _select_all(self) -> None:
         """选择当前列表中的全部视频。"""
-        self.media_tree.selection_set(self.media_tree.get_children())
+        for row_id, item in self.row_items.items():
+            item.selected = True
+            self._refresh_row(row_id, item)
 
     def _clear_selection(self) -> None:
         """清除当前媒体列表的全部选择。"""
-        self.media_tree.selection_remove(self.media_tree.selection())
+        for row_id, item in self.row_items.items():
+            item.selected = False
+            self._refresh_row(row_id, item)
 
     def _invert_selection(self) -> None:
         """反转当前媒体列表的选择状态。"""
-        selected = set(self.media_tree.selection())
-        all_rows = self.media_tree.get_children()
-        self.media_tree.selection_set([row_id for row_id in all_rows if row_id not in selected])
+        for row_id, item in self.row_items.items():
+            item.selected = not item.selected
+            self._refresh_row(row_id, item)
 
     def _start_downloads(self) -> None:
         """将选中的媒体项目转换为下载任务并启动队列。"""
-        selected_rows = self.media_tree.selection()
+        selected_items = [item for item in self.row_items.values() if item.selected]
         output_dir = self.output_value.get().strip()
-        if not selected_rows:
+        if not selected_items:
             messagebox.showwarning(APP_NAME, '请先选择至少一个视频。')
             return
         if not output_dir:
@@ -464,7 +516,7 @@ class MediaHubWindow:
             write_subtitles=self.subtitle_option.get(),
             embed_thumbnail=self.thumbnail_option.get(),
         )
-        tasks = [DownloadTask(self.row_items[row_id], options=options) for row_id in selected_rows]
+        tasks = [DownloadTask(item, options=options) for item in selected_items]
         self.download_queue = DownloadQueue(
             on_started=lambda task: self.event_queue.put(('task_started', task)),
             on_progress=lambda task, progress: self.event_queue.put(('task_progress', (task, progress))),

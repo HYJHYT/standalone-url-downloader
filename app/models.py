@@ -16,6 +16,7 @@ class MediaItem:
     duration: int | None = None
     status: str = '等待中'
     detail_status: str = '待解析'
+    selected: bool = False
 
     def duration_text(self) -> str:
         """将秒数转换为适合列表显示的时长文本。"""
